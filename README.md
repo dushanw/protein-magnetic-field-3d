@@ -10,7 +10,22 @@ paramagnetic, so it perturbs an external B₀ field. Oxyhemoglobin is
 low-spin and effectively diamagnetic. The fMRI signal you've seen in
 neuroscience papers tracks exactly the field perturbation we visualize here.
 
-![](docs/screenshot.png) <!-- optional, not generated automatically -->
+![Hemoglobin magnetic-field GUI: cyan isosurface plus magma-colored Z-slice with white log10|ΔB| contour lines, hemoglobin shown as four colored backbone ribbons with heme groups and orange Fe atoms carrying yellow dipole-moment arrows](docs/screenshot.png)
+
+*Default view: cyan **isosurface** of |ΔB|, magma-colored **Z-slice** with white **contour lines** of log₁₀ |ΔB|, and the four hemoglobin chains as colored ribbons. Each orange Fe carries a yellow induced-dipole arrow.*
+
+<details>
+<summary><b>More views</b> (click to expand)</summary>
+
+![Z-slice scanned to +15 A above the protein, showing concentric circular contour rings centered on each Fe atom - the canonical magnetic dipole far-field pattern](docs/screenshot_scan_z.png)
+
+*Z-slice scanned to **+15 Å above the heme plane** using the bottom-right slider — concentric circular contour rings appear around each Fe atom, the canonical 1/r³ magnetic dipole far-field signature.*
+
+![All three orthogonal cross-section contour planes turned on at the protein center, X (red), Y (green) and Z (blue), showing closed dipolar contour loops on each plane](docs/screenshot_tri_axis.png)
+
+*All three orthogonal contour planes turned on at the protein center — closed dipolar contour loops on each cross-section.*
+
+</details>
 
 ## What the simulator does
 
@@ -96,6 +111,7 @@ the max and median of |ΔB| in nano-Tesla.
 ├── requirements.txt
 ├── README.md
 ├── data/                     # PDB cache (auto-populated)
+├── docs/                     # README screenshots
 └── src/
     ├── __init__.py
     ├── pdb_loader.py         # download + minimal PDB parser
