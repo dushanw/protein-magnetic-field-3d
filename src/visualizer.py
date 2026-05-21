@@ -50,6 +50,19 @@ FE_COLOR = "#FF8C00"     # orange
 HEM_COLOR = "#8E44AD"    # violet
 DIPOLE_ARROW_COLOR = "#FFD400"
 
+# Per-layer colors used to color-code every label, slider title, and toggle
+# button. The same color is shared between a layer's visualization actor
+# and its UI controls, so the GUI is self-documenting.
+ISO_COLOR        = "#00E5FF"   # cyan
+VECTORS_COLOR    = "#FF8C00"   # orange
+STREAM_COLOR     = "#55E07F"   # mint green
+SLICE_X_COLOR    = "#FF5C5C"   # bright red
+SLICE_Y_COLOR    = "#7CFC8A"   # bright lime
+SLICE_Z_COLOR    = "#5DADE2"   # bright sky blue
+B0_TITLE_COLOR   = "#FFD400"   # gold - matches the dipole arrows
+MOMENT_COLOR     = "#FFA940"   # warm amber
+INFO_TEXT_COLOR  = "#F0F0F0"   # near-white for static info labels
+
 
 class HemoglobinFieldGUI:
     """Stateful interactive plotter for the dipole-field visualization."""
@@ -392,140 +405,192 @@ class HemoglobinFieldGUI:
 
     # ----------------------------------------------------------- widgets/UI
 
+    def _styled_slider(
+        self,
+        callback,
+        rng,
+        value,
+        title,
+        pointa,
+        pointb,
+        title_color,
+        fmt=None,
+    ):
+        """Add a slider with consistent, high-contrast styling.
+
+        The title and the active value label both render in `title_color`
+        with a slightly bold sans font, and the slider knob is shrunk so
+        it does not visually clobber the title text.
+        """
+        kwargs = dict(
+            callback=callback,
+            rng=rng,
+            value=value,
+            title=title,
+            pointa=pointa,
+            pointb=pointb,
+            style="modern",
+            title_color=title_color,
+            title_height=0.022,
+            title_opacity=1.0,
+            slider_width=0.025,         # smaller knob -> less overlap with title
+            tube_width=0.006,           # slightly thicker track for visibility
+        )
+        if fmt is not None:
+            kwargs["fmt"] = fmt
+        slider = self.plotter.add_slider_widget(**kwargs)
+
+        # Also color and bold the slider's value-label text via the underlying
+        # VTK representation (PyVista's add_slider_widget doesn't expose it).
+        try:
+            rep = slider.GetRepresentation()
+            for prop in (rep.GetLabelProperty(), rep.GetTitleProperty()):
+                r = int(title_color[1:3], 16) / 255.0
+                g = int(title_color[3:5], 16) / 255.0
+                b = int(title_color[5:7], 16) / 255.0
+                prop.SetColor(r, g, b)
+                prop.SetBold(True)
+                prop.SetFontFamilyToArial()
+                prop.SetShadow(False)
+        except Exception:  # noqa: BLE001
+            pass
+        return slider
+
     def _add_widgets(self) -> None:
         # Top: two rows of "what to compute" sliders.
-        self.plotter.add_slider_widget(
+        self._styled_slider(
             callback=self._set_iso_log10,
             rng=[3.5, 8.5],
             value=self.state["iso_log10_nT"],
             title="log10 |dB| iso [nT]",
             pointa=(0.03, 0.88), pointb=(0.47, 0.88),
-            style="modern",
+            title_color=ISO_COLOR,
         )
-        self.plotter.add_slider_widget(
+        self._styled_slider(
             callback=self._set_b0_axis,
             rng=[0.0, 2.0],
             value=float(self.state["b0_axis"]),
-            title="B0 axis (0=X 1=Y 2=Z)",
+            title="B0 axis  (0=X  1=Y  2=Z)",
             pointa=(0.55, 0.88), pointb=(0.97, 0.88),
             fmt="%.0f",
-            style="modern",
+            title_color=B0_TITLE_COLOR,
         )
-        self.plotter.add_slider_widget(
+        self._styled_slider(
             callback=self._set_moment_scale,
             rng=[0.0, 1.0],
             value=self.state["moment_scale"],
-            title="moment scale (1=deoxy, 0=oxy)",
+            title="moment scale  (1=deoxy, 0=oxy)",
             pointa=(0.03, 0.78), pointb=(0.47, 0.78),
-            style="modern",
+            title_color=MOMENT_COLOR,
         )
-        self.plotter.add_slider_widget(
+        self._styled_slider(
             callback=self._set_stream_density,
             rng=[3, 20],
             value=self.state["stream_density"],
             title="streamline seed density",
             pointa=(0.55, 0.78), pointb=(0.97, 0.78),
             fmt="%.0f",
-            style="modern",
+            title_color=STREAM_COLOR,
         )
 
         # Bottom: one row of "where is the slice plane" sliders, one per
         # axis. They scan the corresponding cross-section through the field
         # grid (range = +/- the grid half-extent, in Angstroms).
         he = float(self.grid_half_extent)
-        self.plotter.add_slider_widget(
+        self._styled_slider(
             callback=self._set_slice_x_offset,
             rng=[-he, he],
             value=self.state["slice_x_offset"],
             title="X-slice offset [A]",
             pointa=(0.03, 0.15), pointb=(0.27, 0.15),
             fmt="%.1f",
-            style="modern",
+            title_color=SLICE_X_COLOR,
         )
-        self.plotter.add_slider_widget(
+        self._styled_slider(
             callback=self._set_slice_y_offset,
             rng=[-he, he],
             value=self.state["slice_y_offset"],
             title="Y-slice offset [A]",
             pointa=(0.30, 0.15), pointb=(0.54, 0.15),
             fmt="%.1f",
-            style="modern",
+            title_color=SLICE_Y_COLOR,
         )
-        self.plotter.add_slider_widget(
+        self._styled_slider(
             callback=self._set_slice_z_offset,
             rng=[-he, he],
             value=self.state["slice_z_offset"],
             title="Z-slice offset [A]",
             pointa=(0.57, 0.15), pointb=(0.80, 0.15),
             fmt="%.1f",
-            style="modern",
+            title_color=SLICE_Z_COLOR,
         )
 
-        # Toggle buttons (bottom row, left to right).
+        # Toggle buttons (bottom row, left to right). Each button's label
+        # is color-matched to the layer it toggles so the GUI is
+        # self-documenting at a glance.
         self.plotter.add_checkbox_button_widget(
             self._toggle_iso, value=self.state["show_iso"],
-            position=(20, 20), size=28, border_size=2,
-            color_on="#00E5FF", color_off="#444444",
+            position=(20, 20), size=30, border_size=2,
+            color_on=ISO_COLOR, color_off="#3a3a3a",
         )
         self.plotter.add_text(
-            "Iso", position=(55, 22), font_size=10, color="white", name="lbl_iso"
+            "Iso", position=(58, 24), font_size=12, color=ISO_COLOR,
+            font="arial", name="lbl_iso",
         )
         self.plotter.add_checkbox_button_widget(
             self._toggle_vectors, value=self.state["show_vectors"],
-            position=(120, 20), size=28, border_size=2,
-            color_on="#FF8C00", color_off="#444444",
+            position=(120, 20), size=30, border_size=2,
+            color_on=VECTORS_COLOR, color_off="#3a3a3a",
         )
         self.plotter.add_text(
-            "Vectors", position=(155, 22), font_size=10, color="white",
-            name="lbl_vec",
+            "Vectors", position=(158, 24), font_size=12, color=VECTORS_COLOR,
+            font="arial", name="lbl_vec",
         )
         self.plotter.add_checkbox_button_widget(
             self._toggle_streamlines, value=self.state["show_streamlines"],
-            position=(240, 20), size=28, border_size=2,
-            color_on="#55E07F", color_off="#444444",
+            position=(245, 20), size=30, border_size=2,
+            color_on=STREAM_COLOR, color_off="#3a3a3a",
         )
         self.plotter.add_text(
-            "Streamlines", position=(275, 22), font_size=10, color="white",
-            name="lbl_str",
+            "Streamlines", position=(283, 24), font_size=12, color=STREAM_COLOR,
+            font="arial", name="lbl_str",
         )
-        # Three independent slice toggles (X red, Y green, Z blue - standard
-        # axis colors). Each one enables/disables its own cross-section.
         self.plotter.add_checkbox_button_widget(
             self._toggle_slice_x, value=self.state["show_slice_x"],
-            position=(400, 20), size=28, border_size=2,
-            color_on="#E74C3C", color_off="#444444",
+            position=(415, 20), size=30, border_size=2,
+            color_on=SLICE_X_COLOR, color_off="#3a3a3a",
         )
         self.plotter.add_text(
-            "slice X", position=(435, 22), font_size=10, color="white",
-            name="lbl_sx",
+            "slice X", position=(453, 24), font_size=12, color=SLICE_X_COLOR,
+            font="arial", name="lbl_sx",
         )
         self.plotter.add_checkbox_button_widget(
             self._toggle_slice_y, value=self.state["show_slice_y"],
-            position=(510, 20), size=28, border_size=2,
-            color_on="#2ECC71", color_off="#444444",
+            position=(540, 20), size=30, border_size=2,
+            color_on=SLICE_Y_COLOR, color_off="#3a3a3a",
         )
         self.plotter.add_text(
-            "slice Y", position=(545, 22), font_size=10, color="white",
-            name="lbl_sy",
+            "slice Y", position=(578, 24), font_size=12, color=SLICE_Y_COLOR,
+            font="arial", name="lbl_sy",
         )
         self.plotter.add_checkbox_button_widget(
             self._toggle_slice_z, value=self.state["show_slice_z"],
-            position=(620, 20), size=28, border_size=2,
-            color_on="#3498DB", color_off="#444444",
+            position=(665, 20), size=30, border_size=2,
+            color_on=SLICE_Z_COLOR, color_off="#3a3a3a",
         )
         self.plotter.add_text(
-            "slice Z", position=(655, 22), font_size=10, color="white",
-            name="lbl_sz",
+            "slice Z", position=(703, 24), font_size=12, color=SLICE_Z_COLOR,
+            font="arial", name="lbl_sz",
         )
 
     def _add_title_and_legend(self) -> None:
         title = (
             f"Magnetic field around {self.structure.pdb_id} "
-            f"(hemoglobin) — {self.structure.iron_positions.shape[0]} Fe centers"
+            f"(hemoglobin) - {self.structure.iron_positions.shape[0]} Fe centers"
         )
         self.plotter.add_text(
-            title, position="upper_left", font_size=12, color="white",
-            name="title",
+            title, position="upper_left", font_size=14, color=INFO_TEXT_COLOR,
+            font="arial", name="title",
         )
 
         legend_entries = []
@@ -563,10 +628,10 @@ class HemoglobinFieldGUI:
             f"|dB| max: {finite.max():.2e} nT    "
             f"|dB| median: {np.median(finite):.2e} nT"
         )
-        # Anchor by pixel so it sits cleanly under the title, well clear
-        # of the sliders (which occupy the top ~16% of the window).
+        # Anchor by pixel so it sits cleanly above the toggle-button row.
         self.plotter.add_text(
-            text, position=(15, 60), font_size=10, color="white", name="status",
+            text, position=(15, 60), font_size=11, color=INFO_TEXT_COLOR,
+            font="arial", name="status",
         )
 
     # ----------------------------------------------------- widget callbacks
