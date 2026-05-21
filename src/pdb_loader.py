@@ -1,0 +1,173 @@
+"""
+PDB structure loader.
+
+Downloads a PDB file (default: 2HHB, human deoxyhemoglobin) from the RCSB
+Protein Data Bank if not already cached, then extracts:
+
+- iron (Fe) atom positions  -> these are the paramagnetic dipole centers
+- HEM (heme) atom positions -> for visualization of the four heme groups
+- C-alpha backbone positions per chain -> for protein backbone ribbon
+
+Coordinates are reported in Angstroms in the PDB's native frame.
+"""
+
+from __future__ import annotations
+
+import os
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple
+
+import numpy as np
+
+RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.pdb"
+DEFAULT_PDB_ID = "2HHB"  # Human deoxyhemoglobin, 4 paramagnetic Fe(II) centers.
+
+
+@dataclass
+class ProteinStructure:
+    """Parsed subset of a PDB file relevant to the magnetic-field simulation."""
+
+    pdb_id: str
+    iron_positions: np.ndarray              # (N_fe, 3) float, Angstroms
+    heme_positions: np.ndarray              # (N_hem_atoms, 3) float, Angstroms
+    backbone_by_chain: Dict[str, np.ndarray] = field(default_factory=dict)
+    title: str = ""
+
+    @property
+    def center(self) -> np.ndarray:
+        if self.iron_positions.size:
+            return self.iron_positions.mean(axis=0)
+        if self.heme_positions.size:
+            return self.heme_positions.mean(axis=0)
+        all_bb = np.concatenate(list(self.backbone_by_chain.values()), axis=0)
+        return all_bb.mean(axis=0)
+
+    @property
+    def extent(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Bounding box (min, max) over all loaded atoms."""
+        chunks: List[np.ndarray] = []
+        if self.iron_positions.size:
+            chunks.append(self.iron_positions)
+        if self.heme_positions.size:
+            chunks.append(self.heme_positions)
+        for arr in self.backbone_by_chain.values():
+            if arr.size:
+                chunks.append(arr)
+        all_pts = np.concatenate(chunks, axis=0)
+        return all_pts.min(axis=0), all_pts.max(axis=0)
+
+
+def _cache_path(pdb_id: str, cache_dir: str) -> str:
+    return os.path.join(cache_dir, f"{pdb_id.upper()}.pdb")
+
+
+def download_pdb(pdb_id: str = DEFAULT_PDB_ID, cache_dir: str = "data") -> str:
+    """Return path to a locally cached PDB file, downloading if necessary."""
+    os.makedirs(cache_dir, exist_ok=True)
+    path = _cache_path(pdb_id, cache_dir)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+
+    url = RCSB_URL.format(pdb_id=pdb_id.upper())
+    print(f"[pdb_loader] Downloading {url} ...")
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        data = resp.read()
+    with open(path, "wb") as fh:
+        fh.write(data)
+    print(f"[pdb_loader] Saved to {path} ({len(data)/1024:.1f} kB)")
+    return path
+
+
+def _parse_pdb_atoms(path: str) -> Tuple[List[dict], str]:
+    """
+    Minimal PDB ATOM/HETATM parser. Returns a list of atom dicts plus the TITLE.
+
+    Each atom dict has keys:
+        record   : 'ATOM' or 'HETATM'
+        name     : atom name (e.g. 'CA', 'FE')
+        resname  : residue name (e.g. 'HEM', 'HIS')
+        chain    : chain id
+        resseq   : residue sequence number (int)
+        element  : element symbol (e.g. 'C', 'FE')
+        xyz      : np.ndarray, shape (3,), Angstroms
+    """
+    atoms: List[dict] = []
+    title_parts: List[str] = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            rec = line[:6].strip()
+            if rec == "TITLE":
+                title_parts.append(line[10:80].strip())
+                continue
+            if rec not in ("ATOM", "HETATM"):
+                continue
+            try:
+                name = line[12:16].strip()
+                resname = line[17:20].strip()
+                chain = line[21:22].strip() or " "
+                resseq = int(line[22:26])
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+                element = line[76:78].strip()
+                if not element:
+                    # Fall back to atom name (works for FE, CA, etc.).
+                    element = name.lstrip("0123456789")[:2].strip().upper()
+            except (ValueError, IndexError):
+                continue
+            atoms.append({
+                "record": rec,
+                "name": name,
+                "resname": resname,
+                "chain": chain,
+                "resseq": resseq,
+                "element": element.upper(),
+                "xyz": np.array([x, y, z], dtype=float),
+            })
+    return atoms, " ".join(title_parts).strip()
+
+
+def load_structure(pdb_id: str = DEFAULT_PDB_ID, cache_dir: str = "data") -> ProteinStructure:
+    """Download (if needed) and parse the named PDB into a ProteinStructure."""
+    path = download_pdb(pdb_id, cache_dir=cache_dir)
+    atoms, title = _parse_pdb_atoms(path)
+
+    iron_xyz: List[np.ndarray] = []
+    heme_xyz: List[np.ndarray] = []
+    bb: Dict[str, List[Tuple[int, np.ndarray]]] = {}
+
+    for a in atoms:
+        if a["element"] == "FE":
+            iron_xyz.append(a["xyz"])
+        if a["resname"] == "HEM":
+            heme_xyz.append(a["xyz"])
+        if a["record"] == "ATOM" and a["name"] == "CA":
+            bb.setdefault(a["chain"], []).append((a["resseq"], a["xyz"]))
+
+    backbone: Dict[str, np.ndarray] = {}
+    for chain, items in bb.items():
+        items.sort(key=lambda kv: kv[0])
+        backbone[chain] = np.stack([xyz for _, xyz in items], axis=0)
+
+    return ProteinStructure(
+        pdb_id=pdb_id.upper(),
+        iron_positions=np.array(iron_xyz, dtype=float).reshape(-1, 3),
+        heme_positions=np.array(heme_xyz, dtype=float).reshape(-1, 3),
+        backbone_by_chain=backbone,
+        title=title,
+    )
+
+
+if __name__ == "__main__":
+    s = load_structure()
+    print(f"PDB:    {s.pdb_id}")
+    print(f"Title:  {s.title[:80]}")
+    print(f"Irons:  {s.iron_positions.shape[0]} atoms")
+    print(f"Heme:   {s.heme_positions.shape[0]} atoms")
+    print(f"Chains: {sorted(s.backbone_by_chain)}")
+    for c, arr in s.backbone_by_chain.items():
+        print(f"  chain {c}: {arr.shape[0]} C-alphas")
+    lo, hi = s.extent
+    print(f"Extent (A): {lo} ... {hi}")
+    print(f"Center (A): {s.center}")

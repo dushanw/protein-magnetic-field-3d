@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# PDB cache (auto-downloaded on first run)
+data/*.pdb
+
+# Editor / OS detritus
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Smoke-test artifacts
+headless_smoke*.png
+slice_*.png
