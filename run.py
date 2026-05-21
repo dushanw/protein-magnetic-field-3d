@@ -15,7 +15,7 @@ import argparse
 import sys
 
 from src.pdb_loader import DEFAULT_PDB_ID, load_structure
-from src.visualizer import HemoglobinFieldGUI
+from src.visualizer import ProteinFieldGUI
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -29,8 +29,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="4-letter RCSB PDB id (default: %(default)s)")
     p.add_argument("--grid-n", type=int, default=60,
                    help="Samples per axis on the 3D field grid (default: 60)")
-    p.add_argument("--extent", type=float, default=30.0,
-                   help="Half-extent of the field grid in Angstroms (default: 30)")
+    p.add_argument("--extent", type=float, default=None,
+                   help="Half-extent of the field grid in Angstroms. "
+                        "If omitted, the grid sizes itself to fit each "
+                        "selected protein.")
     return p.parse_args(argv)
 
 
@@ -45,7 +47,7 @@ def main(argv=None) -> int:
         print("[run] No iron atoms found in this PDB - aborting.", file=sys.stderr)
         return 1
 
-    gui = HemoglobinFieldGUI(
+    gui = ProteinFieldGUI(
         structure,
         grid_n=args.grid_n,
         grid_half_extent=args.extent,

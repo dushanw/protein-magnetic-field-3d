@@ -23,6 +23,88 @@ import numpy as np
 RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.pdb"
 DEFAULT_PDB_ID = "2HHB"  # Human deoxyhemoglobin, 4 paramagnetic Fe(II) centers.
 
+# Residue names for "iron cofactor" groups we want to highlight as
+# semi-transparent spheres. Covers all PDB heme variants plus the most
+# common iron-sulfur cluster residue names.
+IRON_COFACTOR_RESNAMES = frozenset({
+    "HEM",   # heme B  - hemoglobin, myoglobin, P450, catalase
+    "HEC",   # heme C  - cytochrome c (covalently attached)
+    "HEA",   # heme A  - cytochrome c oxidase
+    "HEB",   # heme B variant
+    "HEO",   # heme O
+    "HAS",   # heme A_S
+    "FES",   # [2Fe-2S] cluster
+    "SF4",   # [4Fe-4S] cluster
+    "F3S",   # [3Fe-4S] cluster
+    "FE",    # bare iron ion residue (some structures)
+    "FEO",   # iron-oxo cluster
+})
+
+
+@dataclass(frozen=True)
+class ProteinEntry:
+    """One curated entry in the dropdown library of Fe-containing proteins."""
+    pdb_id: str
+    short_name: str   # display label in the dropdown
+    blurb: str        # one-line biological role
+
+
+# Curated library of biologically iconic Fe-containing proteins. Each entry
+# was chosen for pedagogical value (different Fe coordination chemistries,
+# different roles) and verified to download cleanly from RCSB with at least
+# one Fe atom in the parsed structure.
+PROTEIN_LIBRARY = (
+    ProteinEntry(
+        "2HHB", "Hemoglobin (deoxy)",
+        "Human deoxyhemoglobin - oxygen transport in blood. 4 Fe(II) hemes "
+        "in the alpha2-beta2 tetramer; high-spin paramagnetic - basis of "
+        "BOLD fMRI contrast.",
+    ),
+    ProteinEntry(
+        "1MBN", "Myoglobin",
+        "Sperm-whale myoglobin - oxygen storage in muscle. 1 Fe heme. "
+        "First protein ever solved by X-ray crystallography (Kendrew, 1958).",
+    ),
+    ProteinEntry(
+        "1HRC", "Cytochrome c",
+        "Horse-heart cytochrome c - mobile electron carrier in the "
+        "mitochondrial respiratory chain. 1 low-spin Fe heme.",
+    ),
+    ProteinEntry(
+        "2CPP", "Cytochrome P450cam",
+        "P. putida cytochrome P450cam with camphor bound - archetype of "
+        "the P450 superfamily that runs most drug metabolism. 1 Fe heme.",
+    ),
+    ProteinEntry(
+        "1A3N", "Hemoglobin (R-state)",
+        "Alternative crystal form of human hemoglobin - useful for "
+        "comparing the T (tense) and R (relaxed) allosteric states.",
+    ),
+    ProteinEntry(
+        "5RXN", "Rubredoxin",
+        "Clostridium pasteurianum rubredoxin - the smallest known iron-"
+        "sulfur protein (~6 kDa). 1 high-spin Fe(III) in a [Fe-Cys4] site.",
+    ),
+    ProteinEntry(
+        "3FXC", "Ferredoxin [2Fe-2S]",
+        "Spirulina platensis ferredoxin - photosynthetic electron carrier. "
+        "1 [2Fe-2S] cluster (two coupled iron atoms).",
+    ),
+    ProteinEntry(
+        "1A8E", "Transferrin (N-lobe)",
+        "Human serum transferrin N-lobe - iron transport in blood. "
+        "Binds Fe(III) tightly at one site per lobe.",
+    ),
+)
+
+
+def find_protein_entry(pdb_id: str) -> "ProteinEntry | None":
+    pid = pdb_id.upper()
+    for e in PROTEIN_LIBRARY:
+        if e.pdb_id.upper() == pid:
+            return e
+    return None
+
 
 @dataclass
 class ProteinStructure:
@@ -140,7 +222,7 @@ def load_structure(pdb_id: str = DEFAULT_PDB_ID, cache_dir: str = "data") -> Pro
     for a in atoms:
         if a["element"] == "FE":
             iron_xyz.append(a["xyz"])
-        if a["resname"] == "HEM":
+        if a["resname"] in IRON_COFACTOR_RESNAMES:
             heme_xyz.append(a["xyz"])
         if a["record"] == "ATOM" and a["name"] == "CA":
             bb.setdefault(a["chain"], []).append((a["resseq"], a["xyz"]))

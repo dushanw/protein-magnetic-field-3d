@@ -1,9 +1,13 @@
 """
-Interactive 3D visualizer for the magnetic field around hemoglobin.
+Interactive 3D visualizer for the magnetic field around iron-containing
+biological proteins (default: hemoglobin).
 
 Uses PyVista's native widgets (no Qt dependency) so this runs anywhere
 PyVista runs. The GUI offers:
 
+    * 1 dropdown  : pick from a curated library of Fe proteins
+                    (hemoglobin, myoglobin, cytochrome c, P450,
+                    rubredoxin, ferredoxin, transferrin, ...).
     * 7 sliders   : log10(isosurface threshold in nT), B0 direction (X/Y/Z),
                     paramagnetic moment scale (1.0 = deoxy, 0.0 = oxy),
                     streamline density, and three slice-plane offsets
@@ -12,20 +16,20 @@ PyVista runs. The GUI offers:
     * 6 buttons   : toggle isosurface / vectors / streamlines / X-slice /
                     Y-slice / Z-slice.
     * Always on   : protein backbone ribbon (per chain),
-                    heme groups (semi-transparent),
+                    iron cofactors (heme / [Fe-S] cluster, semi-transparent),
                     Fe atoms (orange spheres) + dipole arrows.
 
 Each slice is drawn as a colored cross-section plus white contour-lines of
 log10|dB|, so it is a true contour plot of the magnetic-field magnitude.
 
 Coordinates are in Angstroms; field is in Tesla but displayed in nano-Tesla
-because hemoglobin-scale dipolar fields fall in the 1 - 10^5 nT range over
+because protein-scale dipolar fields fall in the 1 - 10^5 nT range over
 the visualization volume.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pyvista as pv
@@ -37,7 +41,13 @@ from .magnetic_field import (
     induced_moments,
     make_grid,
 )
-from .pdb_loader import ProteinStructure
+from .pdb_loader import (
+    PROTEIN_LIBRARY,
+    ProteinEntry,
+    ProteinStructure,
+    find_protein_entry,
+    load_structure,
+)
 
 # Color palette - colorblind-friendly, dark-background friendly.
 CHAIN_COLORS = {
@@ -64,18 +74,52 @@ MOMENT_COLOR     = "#FFA940"   # warm amber
 INFO_TEXT_COLOR  = "#F0F0F0"   # near-white for static info labels
 
 
-class HemoglobinFieldGUI:
-    """Stateful interactive plotter for the dipole-field visualization."""
+def _compute_adaptive_extent(structure: ProteinStructure, padding: float = 10.0,
+                             lo: float = 20.0, hi: float = 60.0) -> float:
+    """Pick a sensible field-grid half-extent for the given protein.
+
+    Half-extent = half of the bounding-box diagonal + `padding` Angstroms,
+    clamped to [`lo`, `hi`] so the grid stays manageable for both very
+    small (rubredoxin, ~37 A) and very large (P450, ~94 A) proteins.
+    """
+    bb_lo, bb_hi = structure.extent
+    diag = float(np.linalg.norm(bb_hi - bb_lo))
+    extent = 0.5 * diag + padding
+    return float(max(lo, min(hi, extent)))
+
+
+class ProteinFieldGUI:
+    """Stateful interactive plotter for the dipole-field visualization.
+
+    Supports live switching between any of the proteins in PROTEIN_LIBRARY
+    via a dropdown widget at the top of the window. On switch we
+    transparently:
+
+      * download / parse the new PDB,
+      * recompute an adaptive field-grid extent and rebuild the grid,
+      * tear down all protein-specific actors (per-chain backbones,
+        cofactors, Fe spheres, dipole arrows) and re-add them for the
+        new structure,
+      * recompute the dipole field,
+      * update the slice-offset slider ranges to match the new extent,
+      * and reset the camera so the new protein fits in view.
+    """
 
     def __init__(
         self,
         structure: ProteinStructure,
         grid_n: int = 60,
-        grid_half_extent: float = 30.0,
+        grid_half_extent: Optional[float] = None,
     ):
         self.structure = structure
         self.grid_n = grid_n
-        self.grid_half_extent = grid_half_extent
+        # If no explicit half-extent is given, pick one adaptively for
+        # the initial structure (and we'll re-adapt on every switch).
+        self.grid_half_extent = (
+            float(grid_half_extent)
+            if grid_half_extent is not None
+            else _compute_adaptive_extent(structure)
+        )
 
         # Mutable simulation state (driven by the sliders/buttons).
         # Default iso threshold of 10^5.5 nT (~316 uT) gives a beautiful
@@ -100,8 +144,9 @@ class HemoglobinFieldGUI:
         }
 
         # Pre-build the spatial grid once (independent of moment direction).
-        center = structure.center
-        gx, gy, gz = make_grid(center, half_extent=grid_half_extent, n=grid_n)
+        gx, gy, gz = make_grid(
+            structure.center, half_extent=self.grid_half_extent, n=grid_n
+        )
         self.grid_x, self.grid_y, self.grid_z = gx, gy, gz
 
         self.field: Optional[FieldResult] = None
@@ -112,6 +157,12 @@ class HemoglobinFieldGUI:
 
         # Actor handles so we can add/remove them on toggles & resimulations.
         self._actors: Dict[str, object] = {}
+        # Names of every actor added by `_add_protein_actors`, so we can
+        # cleanly tear them down on a protein switch.
+        self._protein_actor_names: List[str] = []
+        # Slice-offset slider widget refs, keyed by axis name. Used to
+        # update slider ranges when the field grid changes size.
+        self._slice_sliders: Dict[str, object] = {}
 
         self._add_protein_actors()
         self._recompute_field_and_redraw()
@@ -120,21 +171,41 @@ class HemoglobinFieldGUI:
 
     # ------------------------------------------------------------------ setup
 
+    # Default colors for chains beyond A-D (we sometimes load proteins
+    # with chain IDs L/H/E etc.). Cycled through in name order.
+    _EXTRA_CHAIN_COLORS = (
+        "#9B59B6", "#1ABC9C", "#F39C12", "#34495E",
+        "#E67E22", "#16A085", "#7F8C8D", "#D35400",
+    )
+
+    def _chain_color(self, chain: str, idx: int) -> str:
+        return CHAIN_COLORS.get(chain) or self._EXTRA_CHAIN_COLORS[
+            idx % len(self._EXTRA_CHAIN_COLORS)
+        ]
+
     def _add_protein_actors(self) -> None:
-        """Add the static protein geometry (backbone + hemes + Fe spheres)."""
-        for chain, ca in self.structure.backbone_by_chain.items():
+        """Add the static protein geometry (backbone + cofactors + Fe).
+
+        Every actor name is also recorded in `self._protein_actor_names`
+        so it can be torn down cleanly when the user switches proteins.
+        """
+        self._protein_actor_names = []
+
+        for idx, (chain, ca) in enumerate(sorted(self.structure.backbone_by_chain.items())):
             if ca.shape[0] < 2:
                 continue
             spline = pv.Spline(ca, n_points=max(ca.shape[0] * 4, 64))
             tube = spline.tube(radius=0.55)
-            color = CHAIN_COLORS.get(chain, "#888888")
+            color = self._chain_color(chain, idx)
+            name = f"backbone_{chain}"
             self.plotter.add_mesh(
                 tube,
                 color=color,
                 smooth_shading=True,
                 specular=0.3,
-                name=f"backbone_{chain}",
+                name=name,
             )
+            self._protein_actor_names.append(name)
 
         if self.structure.heme_positions.size:
             heme_pc = pv.PolyData(self.structure.heme_positions)
@@ -148,6 +219,7 @@ class HemoglobinFieldGUI:
                 specular=0.6,
                 name="heme",
             )
+            self._protein_actor_names.append("heme")
 
         if self.structure.iron_positions.size:
             fe_pc = pv.PolyData(self.structure.iron_positions)
@@ -161,6 +233,7 @@ class HemoglobinFieldGUI:
                 smooth_shading=True,
                 name="iron",
             )
+            self._protein_actor_names.append("iron")
 
     def _update_dipole_arrows(self) -> None:
         """(Re)draw the magnetic-moment arrows on each Fe atom."""
@@ -495,9 +568,10 @@ class HemoglobinFieldGUI:
 
         # Bottom: one row of "where is the slice plane" sliders, one per
         # axis. They scan the corresponding cross-section through the field
-        # grid (range = +/- the grid half-extent, in Angstroms).
+        # grid (range = +/- the grid half-extent, in Angstroms). We keep
+        # references so we can update the ranges when the protein changes.
         he = float(self.grid_half_extent)
-        self._styled_slider(
+        self._slice_sliders["x"] = self._styled_slider(
             callback=self._set_slice_x_offset,
             rng=[-he, he],
             value=self.state["slice_x_offset"],
@@ -506,7 +580,7 @@ class HemoglobinFieldGUI:
             fmt="%.1f",
             title_color=SLICE_X_COLOR,
         )
-        self._styled_slider(
+        self._slice_sliders["y"] = self._styled_slider(
             callback=self._set_slice_y_offset,
             rng=[-he, he],
             value=self.state["slice_y_offset"],
@@ -515,7 +589,7 @@ class HemoglobinFieldGUI:
             fmt="%.1f",
             title_color=SLICE_Y_COLOR,
         )
-        self._styled_slider(
+        self._slice_sliders["z"] = self._styled_slider(
             callback=self._set_slice_z_offset,
             rng=[-he, he],
             value=self.state["slice_z_offset"],
@@ -523,6 +597,41 @@ class HemoglobinFieldGUI:
             pointa=(0.57, 0.15), pointb=(0.80, 0.15),
             fmt="%.1f",
             title_color=SLICE_Z_COLOR,
+        )
+
+        # Protein-selector dropdown (PyVista's text slider: cycles through
+        # the curated PROTEIN_LIBRARY entries). Lives at the very top of
+        # the window, above all the other sliders.
+        protein_names = [e.short_name for e in PROTEIN_LIBRARY]
+        current = find_protein_entry(self.structure.pdb_id)
+        try:
+            current_index = protein_names.index(current.short_name) if current else 0
+        except ValueError:
+            current_index = 0
+        self._protein_slider = self.plotter.add_text_slider_widget(
+            callback=self._on_protein_selected,
+            data=protein_names,
+            value=current_index,
+            pointa=(0.18, 0.965), pointb=(0.97, 0.965),
+            style="modern",
+        )
+        # Apply our high-contrast styling: bold yellow value text, smaller
+        # knob so the protein name is fully legible.
+        try:
+            rep = self._protein_slider.GetRepresentation()
+            for prop in (rep.GetLabelProperty(), rep.GetTitleProperty()):
+                prop.SetColor(1.0, 0.84, 0.0)         # gold
+                prop.SetBold(True)
+                prop.SetFontFamilyToArial()
+                prop.SetShadow(False)
+            rep.SetSliderWidth(0.020)
+            rep.SetTubeWidth(0.006)
+        except Exception:  # noqa: BLE001
+            pass
+        # Static "Protein:" label sitting at the upper-left edge.
+        self.plotter.add_text(
+            "Protein:", position="upper_left", font_size=14,
+            color="#FFD400", font="arial", name="lbl_protein",
         )
 
         # Toggle buttons (bottom row, left to right). Each button's label
@@ -584,35 +693,37 @@ class HemoglobinFieldGUI:
         )
 
     def _add_title_and_legend(self) -> None:
-        title = (
-            f"Magnetic field around {self.structure.pdb_id} "
-            f"(hemoglobin) - {self.structure.iron_positions.shape[0]} Fe centers"
-        )
-        self.plotter.add_text(
-            title, position="upper_left", font_size=14, color=INFO_TEXT_COLOR,
-            font="arial", name="title",
-        )
+        # The protein-selector dropdown at the top already shows the
+        # current protein name, so we skip a redundant title widget.
+        self._rebuild_legend()
+        # Orientation axes widget (stays put across protein switches).
+        self.plotter.add_axes(interactive=False)
 
-        legend_entries = []
-        for chain in sorted(self.structure.backbone_by_chain):
-            legend_entries.append(
-                [f"chain {chain}", CHAIN_COLORS.get(chain, "#888888")]
-            )
-        legend_entries.append(["heme", HEM_COLOR])
-        legend_entries.append(["Fe", FE_COLOR])
+    def _rebuild_legend(self) -> None:
+        """(Re)build the bottom-right legend for the current structure."""
+        legend_entries: list = []
+        for idx, chain in enumerate(sorted(self.structure.backbone_by_chain)):
+            label = f"chain {chain}" if chain.strip() else "backbone"
+            legend_entries.append([label, self._chain_color(chain, idx)])
+        if self.structure.heme_positions.size:
+            legend_entries.append(["Fe cofactor", HEM_COLOR])
+        legend_entries.append(["Fe atom", FE_COLOR])
         legend_entries.append(["dipole moment", DIPOLE_ARROW_COLOR])
-        # Lower-right of window so the legend never overlaps the colorbar
-        # (the colorbar lives on the right edge between y=0.20 and y=0.75).
+
+        # Drop any prior legend then add the new one. PyVista's
+        # add_legend replaces the existing legend automatically by
+        # internal name but we go through remove_legend() defensively.
+        try:
+            self.plotter.remove_legend()
+        except Exception:  # noqa: BLE001
+            pass
         self.plotter.add_legend(
             legend_entries,
             bcolor=(0, 0, 0),
             face=None,
             loc="lower right",
-            size=(0.18, 0.18),
+            size=(0.18, 0.20),
         )
-
-        # Orientation axes widget.
-        self.plotter.add_axes(interactive=False)
 
     def _refresh_status_text(self) -> None:
         if self.field is None:
@@ -622,9 +733,10 @@ class HemoglobinFieldGUI:
         if finite.size == 0:
             return
         axis_name = "XYZ"[self.state["b0_axis"]]
+        n_fe = self.structure.iron_positions.shape[0]
         text = (
-            f"B0 axis: +{axis_name}    "
-            f"moment scale: {self.state['moment_scale']:.2f}    "
+            f"{self.structure.pdb_id}  ({n_fe} Fe)    "
+            f"B0: +{axis_name}    moment: {self.state['moment_scale']:.2f}    "
             f"|dB| max: {finite.max():.2e} nT    "
             f"|dB| median: {np.median(finite):.2e} nT"
         )
@@ -696,7 +808,106 @@ class HemoglobinFieldGUI:
         if self.state["show_slice_z"]:
             self._redraw_field_actors()
 
+    # --------------------------------------------------- protein switching
+
+    def _on_protein_selected(self, name: str) -> None:
+        """Callback for the top-of-window protein dropdown."""
+        entry = next((e for e in PROTEIN_LIBRARY if e.short_name == name), None)
+        if entry is None or entry.pdb_id.upper() == self.structure.pdb_id.upper():
+            return
+        self._load_protein(entry)
+
+    def _load_protein(self, entry: ProteinEntry) -> None:
+        """Replace the active structure with `entry`, rebuilding everything."""
+        print(f"[gui] Switching to {entry.pdb_id} ({entry.short_name}) ...")
+        try:
+            new_structure = load_structure(entry.pdb_id)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[gui] Failed to load {entry.pdb_id}: {ex}")
+            return
+
+        if new_structure.iron_positions.shape[0] == 0:
+            print(f"[gui] {entry.pdb_id} has no Fe atoms - keeping current protein.")
+            return
+
+        # 1. Tear down old protein actors (backbones + heme + Fe).
+        for name in list(self._protein_actor_names):
+            try:
+                self.plotter.remove_actor(name)
+            except Exception:  # noqa: BLE001
+                pass
+        self._protein_actor_names = []
+        if "dipole_arrows" in self._actors:
+            try:
+                self.plotter.remove_actor(self._actors.pop("dipole_arrows"))
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 2. Tear down old field actors so they don't reference a stale grid.
+        cleanup_keys = ["iso", "vectors", "streamlines"]
+        for ax in ("x", "y", "z"):
+            cleanup_keys.append(f"slice_{ax}")
+            cleanup_keys.append(f"slice_{ax}_contour")
+        for key in cleanup_keys:
+            if key in self._actors:
+                try:
+                    self.plotter.remove_actor(self._actors.pop(key))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # 3. Swap in the new structure and rebuild the field grid.
+        self.structure = new_structure
+        self.grid_half_extent = _compute_adaptive_extent(new_structure)
+        gx, gy, gz = make_grid(
+            new_structure.center, half_extent=self.grid_half_extent, n=self.grid_n,
+        )
+        self.grid_x, self.grid_y, self.grid_z = gx, gy, gz
+
+        # Reset slice offsets to 0 (their old absolute positions are
+        # meaningless in the new protein's frame) and update slider ranges.
+        for ax in ("x", "y", "z"):
+            self.state[f"slice_{ax}_offset"] = 0.0
+            self._update_slice_slider_range(ax, self.grid_half_extent)
+
+        # 4. Re-add protein actors and recompute the dipole field.
+        self._add_protein_actors()
+        self._rebuild_legend()
+        self._recompute_field_and_redraw()
+
+        # 5. Reset the camera so the new protein fits in the window.
+        try:
+            self.plotter.reset_camera()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 6. Push the new selection into the dropdown widget so the GUI
+        # label updates even when this method is invoked programmatically.
+        try:
+            names = [e.short_name for e in PROTEIN_LIBRARY]
+            idx = names.index(entry.short_name)
+            self._protein_slider.GetRepresentation().SetValue(float(idx))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _update_slice_slider_range(self, axis: str, half_extent: float) -> None:
+        """Push a new value range onto an existing slice-offset slider."""
+        slider = self._slice_sliders.get(axis)
+        if slider is None:
+            return
+        try:
+            rep = slider.GetRepresentation()
+            rep.SetMinimumValue(-half_extent)
+            rep.SetMaximumValue(+half_extent)
+            rep.SetValue(0.0)
+        except Exception:  # noqa: BLE001
+            pass
+
     # ------------------------------------------------------------ entrypoint
 
     def show(self) -> None:
         self.plotter.show()
+
+
+# Backwards-compatible alias - the GUI is no longer hemoglobin-specific,
+# but external scripts may still import the old name.
+HemoglobinFieldGUI = ProteinFieldGUI
